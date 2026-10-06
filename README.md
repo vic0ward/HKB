@@ -27,8 +27,6 @@ The current monitoring setup supports:
 ```bash
 git clone git@github.com:vic0ward/HKB.git
 cd HKB
-<<<<<<< HEAD
-=======
 ```
 
 ### 2. Create a Python environment
