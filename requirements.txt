@@ -1,0 +1,7 @@
+pyserial
+pyvisa
+pyvisa-py
+sensirion-shdlc-driver
+sensirion-shdlc-sensorbridge
+sensirion-i2c-driver
+sensirion-i2c-sht4x
