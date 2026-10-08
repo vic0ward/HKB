@@ -32,15 +32,8 @@ from serial.tools import list_ports
 from HKB import HKB
 from DMM import Agilent34410A
 
-from sensirion_i2c_driver import I2cConnection, CrcCalculator
-from sensirion_shdlc_driver import ShdlcSerialPort, ShdlcConnection
-from sensirion_shdlc_sensorbridge import (
-    SensorBridgePort,
-    SensorBridgeShdlcDevice,
-    SensorBridgeI2cProxy,
-)
-from sensirion_driver_adapters.i2c_adapter.i2c_channel import I2cChannel
-from sensirion_i2c_sht4x.device import Sht4xDevice
+from SHT40 import SHT40SensorBridge, SensorBridgePort
+
 
 
 HKB_SERIAL = "FT404Z59"
@@ -70,98 +63,6 @@ def find_serial_device(serial_number):
     )
 
 
-def numeric_value(value):
-    """Convert Sensirion typed measurement values to float."""
-    # Current Sensirion generated types can normally be converted directly.
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        pass
-
-    # Keep compatibility with wrappers exposing the number as `.value`.
-    if hasattr(value, "value"):
-        return float(value.value)
-
-    raise TypeError(f"Cannot convert Sensirion value {value!r} to float")
-
-
-class SHT40SensorBridge:
-    """SHT40 connected to SensorBridge port ONE."""
-
-    def __init__(self, serial_number=SENSORBRIDGE_SERIAL):
-        self.serial_number = serial_number
-        self.serial_port_name = find_serial_device(serial_number)
-        self.port = None
-        self.bridge = None
-        self.sensor = None
-
-    def open(self):
-        LOGGER.info(
-            "Opening Sensirion SensorBridge %s on %s",
-            self.serial_number,
-            self.serial_port_name,
-        )
-
-        self.port = ShdlcSerialPort(
-            port=self.serial_port_name,
-            baudrate=460800,
-        )
-        self.port.__enter__()
-
-        self.bridge = SensorBridgeShdlcDevice(
-            ShdlcConnection(self.port),
-            slave_address=0,
-        )
-        self.bridge.set_i2c_frequency(
-            SensorBridgePort.ONE,
-            frequency=100e3,
-        )
-        self.bridge.set_supply_voltage(
-            SensorBridgePort.ONE,
-            voltage=3.3,
-        )
-        self.bridge.switch_supply_on(SensorBridgePort.ONE)
-
-        i2c_transceiver = SensorBridgeI2cProxy(
-            self.bridge,
-            port=SensorBridgePort.ONE,
-        )
-        channel = I2cChannel(
-            I2cConnection(i2c_transceiver),
-            slave_address=0x44,
-            crc=CrcCalculator(8, 0x31, 0xff, 0x0),
-        )
-        self.sensor = Sht4xDevice(channel)
-
-        try:
-            self.sensor.soft_reset()
-            time.sleep(0.01)
-        except BaseException:
-            LOGGER.warning("SHT40 soft reset failed", exc_info=True)
-
-        LOGGER.info("SHT40 serial number: %s", self.sensor.serial_number())
-        return self
-
-    def read(self):
-        if self.sensor is None:
-            raise RuntimeError("SHT40 is not open")
-
-        # Same mode as the Sensirion example supplied with the project.
-        temperature, humidity = self.sensor.measure_lowest_precision()
-        return numeric_value(temperature), numeric_value(humidity)
-
-    def close(self):
-        if self.port is not None:
-            try:
-                # __exit__ is the public cleanup path used by the example's
-                # `with ShdlcSerialPort(...)` context manager.
-                self.port.__exit__(None, None, None)
-            finally:
-                self.port = None
-                self.bridge = None
-                self.sensor = None
-
-
 class Monitoring:
     def __init__(
         self,
@@ -180,13 +81,15 @@ class Monitoring:
         LOGGER.info("HKB %s found on %s", hkb_serial, hkb_port)
         self.hkb = HKB(port=hkb_port)
 
-        self.sht40 = SHT40SensorBridge(sensorbridge_serial).open()
+        self.sht40 = SHT40SensorBridge(
+            sensorbridge_serial,
+            ports=(SensorBridgePort.ONE, SensorBridgePort.TWO),
+        ).open()
 
         self.dmm = None
         if enable_dmm:
             LOGGER.info("Opening Agilent 34410A at %s", dmm_host)
             self.dmm = Agilent34410A(hostname=dmm_host)
-            LOGGER.info("DMM identified as: %s", self.dmm.identify())
 
         self._log_date = None
         self._log_file = None
@@ -213,10 +116,11 @@ class Monitoring:
                 "H0", "H1", "H2", "H3",
                 "T0", "T1", "T2", "T3",
                 "PT100_0", "PT100_1", "PT100_2", "PT100_3",
-                "P0", "P1",
-                "FANS0", "FANS1",
-                "PLEDS",
-                "SHT40_T", "SHT40_RH",
+                #"P0", "P1",
+                #"FANS0", "FANS1",
+                #"PLEDS",
+                "SHT40_1_T", "SHT40_1_RH",
+                "SHT40_2_T", "SHT40_2_RH",
                 "DMM",
             ])
             self._log_file.flush()
@@ -238,13 +142,26 @@ class Monitoring:
         self.hkb.get_PT100()
         self.hkb.get_humidities_temperatures()
 
-        sht_t = math.nan
-        sht_rh = math.nan
+        sht1_t = math.nan
+        sht1_rh = math.nan
+        sht2_t = math.nan
+        sht2_rh = math.nan
+
         try:
-            sht_t, sht_rh = self.sht40.read()
-            LOGGER.info("SHT40: %.3f degC, %.3f %%RH", sht_t, sht_rh)
+            sht1_t, sht1_rh = self.sht40.read(SensorBridgePort.ONE)
+            LOGGER.info(
+                "SHT40 port ONE: %.3f degC, %.3f %%RH", sht1_t, sht1_rh
+            )
         except Exception:
-            LOGGER.exception("SHT40 readout failed")
+            LOGGER.exception("SHT40 readout failed on port ONE")
+
+        try:
+            sht2_t, sht2_rh = self.sht40.read(SensorBridgePort.TWO)
+            LOGGER.info(
+                "SHT40 port TWO: %.3f degC, %.3f %%RH", sht2_t, sht2_rh
+            )
+        except Exception:
+            LOGGER.exception("SHT40 readout failed on port TWO")
 
         dmm_value = math.nan
         if self.dmm is not None:
@@ -252,7 +169,7 @@ class Monitoring:
                 dmm_value = self.dmm.read_temperature_4w(
                     r0_ohm=100.0, averages=10
                 )
-                LOGGER.info("DMM Pt100: %.3f degC", dmm_value)
+                LOGGER.info("DMM PT100: %.3f degC", dmm_value)
             except Exception:
                 LOGGER.exception("Agilent 34410A readout failed")
 
@@ -261,11 +178,13 @@ class Monitoring:
             "H": self._values(self.hkb.H, 4),
             "T": self._values(self.hkb.T, 4),
             "PT100": self._values(self.hkb.PT100, 4),
-            "P": self._values(self.hkb.P, 2),
-            "FANS": self._values(self.hkb.FANS, 2),
-            "PLEDS": self._values(self.hkb.PLEDS, 1),
-            "SHT40_T": sht_t,
-            "SHT40_RH": sht_rh,
+            #"P": self._values(self.hkb.P, 2),
+            #"FANS": self._values(self.hkb.FANS, 2),
+            #"PLEDS": self._values(self.hkb.PLEDS, 1),
+            "SHT40_1_T": sht1_t,
+            "SHT40_1_RH": sht1_rh,
+            "SHT40_2_T": sht2_t,
+            "SHT40_2_RH": sht2_rh,
             "DMM": dmm_value,
         }
 
@@ -276,10 +195,14 @@ class Monitoring:
             + data["H"]
             + data["T"]
             + data["PT100"]
-            + data["P"]
-            + data["FANS"]
-            + data["PLEDS"]
-            + [data["SHT40_T"], data["SHT40_RH"], data["DMM"]]
+            #+ data["P"]
+            #+ data["FANS"]
+            #+ data["PLEDS"]
+            + [
+                data["SHT40_1_T"], data["SHT40_1_RH"],
+                data["SHT40_2_T"], data["SHT40_2_RH"],
+                data["DMM"],
+            ]
         )
         self._log_file.flush()
 
@@ -320,14 +243,6 @@ class Monitoring:
             self.sht40.close()
         except Exception:
             LOGGER.exception("Error closing SensorBridge")
-
-        if self.dmm is not None:
-            try:
-                self.dmm.close()
-            except Exception:
-                LOGGER.exception("Error closing Agilent 34410A")
-            finally:
-                self.dmm = None
 
         try:
             self.hkb.stop()
